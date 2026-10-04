@@ -14,6 +14,14 @@ import { clampDeskSize, clampItemDimension } from '../../shared/layoutRules'
 import { moveCanvasItem, rotateCanvasItem } from '../canvas/canvasViewModel'
 import { createMaterialDraft } from '../materials/materialsViewModel'
 import { inspectPlan } from '../inspection/inspectionViewModel'
+import {
+  formatRelativeTime,
+  getPlanSession,
+  prunePlanSessions,
+  resolveSelectedItemId,
+  savePlanSession,
+  type PlanSessionMemory,
+} from './planSessionMemory'
 import { LocalWorkspaceRepository, type WorkspaceRepository } from './workspaceRepository'
 
 export interface WorkspaceViewModel {
@@ -45,6 +53,8 @@ const emptyInspection = { analysis: { overlapIds: [], outOfBoundsIds: [], covera
 
 export function useWorkspaceViewModel(repository?: WorkspaceRepository): WorkspaceViewModel {
   const repositoryRef = useRef(repository ?? new LocalWorkspaceRepository())
+  const sessionMemoryRef = useRef<PlanSessionMemory>({})
+  const pendingScrollRestoreRef = useRef<number | null>(null)
   const [status, setStatus] = useState<WorkspaceStatus>('loading')
   const [document, setDocument] = useState<WorkspaceDocument | null>(null)
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null)
@@ -76,6 +86,14 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
   const inspection = useMemo(() => activePlan ? inspectPlan(activePlan) : emptyInspection, [activePlan])
   const { analysis, issueIds, issueCount } = inspection
 
+  const activePlanId = document?.activePlanId
+  useEffect(() => {
+    const scrollTop = pendingScrollRestoreRef.current
+    if (scrollTop === null) return
+    pendingScrollRestoreRef.current = null
+    window.scrollTo(0, scrollTop)
+  }, [activePlanId])
+
   const persist = useCallback(async (nextDocument: WorkspaceDocument, message: string) => {
     setDocument(nextDocument)
     setStatus('saving')
@@ -95,6 +113,24 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
     const nextDocument = { ...document, plans: document.plans.map((plan) => plan.id === nextPlan.id ? nextPlan : plan) }
     void persist(nextDocument, message)
   }, [activePlan, document, persist])
+
+  // 所有方案切换都经过这里：先记住当前方案的编辑现场，再恢复目标方案的现场，
+  // 同时清掉已删除方案的记忆，保证不会留下指向不存在方案的现场。
+  const switchToPlan = useCallback((nextDocument: WorkspaceDocument, message: string) => {
+    if (activePlan) {
+      sessionMemoryRef.current = savePlanSession(sessionMemoryRef.current, activePlan.id, {
+        selectedItemId,
+        scrollTop: window.scrollY,
+        lastEditedAt: activePlan.updatedAt,
+      })
+    }
+    sessionMemoryRef.current = prunePlanSessions(sessionMemoryRef.current, nextDocument.plans)
+    const nextPlan = nextDocument.plans.find((plan) => plan.id === nextDocument.activePlanId) ?? null
+    const session = nextPlan ? getPlanSession(sessionMemoryRef.current, nextPlan.id) : null
+    setSelectedItemId(nextPlan ? resolveSelectedItemId(session, nextPlan) : null)
+    pendingScrollRestoreRef.current = session?.scrollTop ?? 0
+    void persist(nextDocument, message)
+  }, [activePlan, selectedItemId, persist])
 
   const selectItem = useCallback((id: string | null) => setSelectedItemId(id), [])
 
@@ -138,9 +174,8 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
   const createNewPlan = useCallback(() => {
     if (!document) return
     const plan = createPlan(`工作台 ${document.plans.length + 1}`, false)
-    void persist({ ...document, plans: [...document.plans, plan], activePlanId: plan.id }, '已创建空白方案')
-    setSelectedItemId(null)
-  }, [document, persist])
+    switchToPlan({ ...document, plans: [...document.plans, plan], activePlanId: plan.id }, '已创建空白方案')
+  }, [document, switchToPlan])
 
   const duplicatePlan = useCallback(() => {
     if (!document || !activePlan) return
@@ -151,15 +186,20 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
       items: activePlan.items.map((item) => ({ ...item, id: createId('item') })),
       updatedAt: new Date().toISOString(),
     }
-    void persist({ ...document, plans: [...document.plans, copy], activePlanId: copy.id }, '方案已复制')
-    setSelectedItemId(null)
-  }, [activePlan, document, persist])
+    // 副本是全新的方案，设备 id 都已重新生成，不继承原方案的编辑现场
+    switchToPlan({ ...document, plans: [...document.plans, copy], activePlanId: copy.id }, '方案已复制，副本从空白现场开始')
+  }, [activePlan, document, switchToPlan])
 
   const selectPlan = useCallback((id: string) => {
-    if (!document || !document.plans.some((plan) => plan.id === id)) return
-    void persist({ ...document, activePlanId: id }, '已切换方案')
-    setSelectedItemId(null)
-  }, [document, persist])
+    if (!document || id === document.activePlanId) return
+    const nextPlan = document.plans.find((plan) => plan.id === id)
+    if (!nextPlan) return
+    const session = getPlanSession(sessionMemoryRef.current, id)
+    const message = session?.lastEditedAt
+      ? `已恢复「${nextPlan.name}」的编辑现场，上次改动${formatRelativeTime(session.lastEditedAt)}`
+      : `已切换到「${nextPlan.name}」`
+    switchToPlan({ ...document, activePlanId: id }, message)
+  }, [document, switchToPlan])
 
   const deleteCurrentPlan = useCallback(() => {
     if (!document || !activePlan || document.plans.length <= 1) {
@@ -167,9 +207,8 @@ export function useWorkspaceViewModel(repository?: WorkspaceRepository): Workspa
       return
     }
     const remaining = document.plans.filter((plan) => plan.id !== activePlan.id)
-    void persist({ ...document, plans: remaining, activePlanId: remaining[0].id }, '方案已删除')
-    setSelectedItemId(null)
-  }, [activePlan, document, persist])
+    switchToPlan({ ...document, plans: remaining, activePlanId: remaining[0].id }, '方案已删除')
+  }, [activePlan, document, switchToPlan])
 
   const openPreview = useCallback(() => setIsPreviewOpen(true), [])
   const closePreview = useCallback(() => setIsPreviewOpen(false), [])

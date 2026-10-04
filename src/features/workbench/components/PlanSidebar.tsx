@@ -1,5 +1,6 @@
 import { Copy, LayoutGrid, Plus, Trash2 } from 'lucide-react'
 import type { WorkspacePlan } from '../../../shared/models'
+import { formatRelativeTime } from '../planSessionMemory'
 
 interface PlanSidebarProps {
   plans: WorkspacePlan[]
@@ -19,7 +20,7 @@ export function PlanSidebar({ plans, activePlanId, onSelect, onCreate, onDuplica
         {plans.map((plan, index) => (
           <button className={`plan-card ${plan.id === activePlanId ? 'is-active' : ''}`} key={plan.id} onClick={() => onSelect(plan.id)} type="button">
             <span className="plan-number">0{index + 1}</span>
-            <span className="plan-card-copy"><strong>{plan.name}</strong><small>{plan.items.length} 件设备 · {plan.deskWidthMm} × {plan.deskHeightMm} mm</small></span>
+            <span className="plan-card-copy"><strong>{plan.name}</strong><small>{plan.items.length} 件设备 · {plan.deskWidthMm} × {plan.deskHeightMm} mm</small><small className="plan-edited-at">上次改动：{formatRelativeTime(plan.updatedAt)}</small></span>
             {plan.id === activePlanId && <span className="active-dot" />}
           </button>
         ))}
